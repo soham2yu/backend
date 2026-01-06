@@ -1,7 +1,7 @@
 import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
-import { OpenAIClient, AzureKeyCredential } from "@azure/openai";
+import { GoogleGenerativeAI } from "@google/generative-ai";
 
 dotenv.config();
 
@@ -9,20 +9,17 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
-const client = new OpenAIClient(
-  process.env.AZURE_OPENAI_ENDPOINT,
-  new AzureKeyCredential(process.env.AZURE_OPENAI_KEY)
-);
+// ---------- Gemini setup ----------
+if (!process.env.GEMINI_API_KEY) {
+  throw new Error("GEMINI_API_KEY is missing in .env");
+}
 
-app.post("/analyze", async (req, res) => {
-  const { text, context } = req.body;
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({ model: "gemini-pro" });
 
-  if (!text) {
-    return res.status(400).json({ error: "No agreement text provided" });
-  }
-
-  try {
-    const prompt = `
+// ---------- Helper: AI analysis ----------
+async function analyzeWithGemini(text, context) {
+  const prompt = `
 You are a decision-safety assistant.
 
 Task:
@@ -32,19 +29,18 @@ Explain risks in simple language.
 Classify overall risk as LOW, MEDIUM, or HIGH.
 
 Context:
-User environment = ${context}
+User environment = ${context || "general user"}
 
 Rules:
 - Do not give legal advice
 - Do not invent facts
 - Be cautious and conservative
+- Respond ONLY with valid JSON
+- Do NOT include markdown
 
-Agreement:
-"""${text}"""
-
-Return JSON in this format:
+Return JSON in this exact format:
 {
-  "risk_level": "",
+  "risk_level": "LOW|MEDIUM|HIGH",
   "risky_clauses": [
     {
       "clause": "",
@@ -53,46 +49,48 @@ Return JSON in this format:
   ],
   "summary": ""
 }
+
+Agreement:
+"""${text}"""
 `;
 
-    const response = await client.getChatCompletions(
-      process.env.AZURE_OPENAI_DEPLOYMENT,
-      [
-        { role: "system", content: "You are a careful assistant." },
-        { role: "user", content: prompt }
-      ]
-    );
+  const result = await model.generateContent(prompt);
+  const raw = result.response.text().trim();
 
-    let raw = response.choices[0].message.content;
-
-// remove markdown if model adds ```json
-raw = raw.replace(/```json|```/g, "").trim();
-
-let parsed;
-try {
-  parsed = JSON.parse(raw);
-} catch (e) {
-  return res.status(500).json({ error: "Invalid AI response format" });
+  return JSON.parse(raw);
 }
 
-// map to frontend-safe structure
-const mapped = {
-  riskLevel: parsed.risk_level.toLowerCase(),
-  clauses: parsed.risky_clauses.map((c) => ({
-    text: c.clause,
-    explanation: c.reason,
-    severity: parsed.risk_level.toLowerCase()
-  }))
-};
+// ---------- Route ----------
+app.post("/analyze", async (req, res) => {
+  const { text, context } = req.body;
 
-res.json(mapped);
+  if (!text || typeof text !== "string") {
+    return res.status(400).json({ error: "No agreement text provided" });
+  }
 
+  try {
+    const parsed = await analyzeWithGemini(text, context);
+
+    // Map to frontend-safe structure
+    const mapped = {
+      riskLevel: parsed.risk_level.toLowerCase(),
+      clauses: parsed.risky_clauses.map((c) => ({
+        text: c.clause,
+        explanation: c.reason,
+        severity: parsed.risk_level.toLowerCase()
+      })),
+      summary: parsed.summary
+    };
+
+    res.json(mapped);
   } catch (error) {
-    console.error(error);
+    console.error("AI error:", error);
     res.status(500).json({ error: "AI analysis failed" });
   }
 });
 
-app.listen(3001, () => {
-  console.log("Backend running on port 3001");
+// ---------- Server ----------
+const PORT = process.env.PORT || 3001;
+app.listen(PORT, () => {
+  console.log(`Backend running on port ${PORT}`);
 });
