@@ -63,9 +63,30 @@ Return JSON in this format:
       ]
     );
 
-    const result = response.choices[0].message.content;
+    let raw = response.choices[0].message.content;
 
-    res.json({ result });
+// remove markdown if model adds ```json
+raw = raw.replace(/```json|```/g, "").trim();
+
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch (e) {
+  return res.status(500).json({ error: "Invalid AI response format" });
+}
+
+// map to frontend-safe structure
+const mapped = {
+  riskLevel: parsed.risk_level.toLowerCase(),
+  clauses: parsed.risky_clauses.map((c) => ({
+    text: c.clause,
+    explanation: c.reason,
+    severity: parsed.risk_level.toLowerCase()
+  }))
+};
+
+res.json(mapped);
+
   } catch (error) {
     console.error(error);
     res.status(500).json({ error: "AI analysis failed" });
