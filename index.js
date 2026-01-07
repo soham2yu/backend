@@ -9,13 +9,11 @@ dotenv.config();
 const AI_MODE = process.env.AI_MODE || "mock";
 const GEMINI_API_KEY = process.env.GEMINI_API_KEY;
 
-// Native fetch is available in Node 18+
 const GEMINI_ENDPOINT =
   "https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent";
 
 console.log("AI MODE:", AI_MODE);
 
-// Safety check for production
 if (AI_MODE === "gemini" && !GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY missing while AI_MODE=gemini");
 }
@@ -25,14 +23,21 @@ const app = express();
 app.use(cors());
 app.use(express.json());
 
+// ---------------- UTILS ----------------
+function normalizeRiskLevel(level) {
+  if (!level) return "Low";
+  const v = level.toLowerCase();
+  if (v === "high") return "High";
+  if (v === "medium") return "Medium";
+  return "Low";
+}
+
 // ---------------- HEALTH CHECK ----------------
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", aiMode: AI_MODE });
 });
 
 // ---------------- GEMINI CALL ----------------
-// NOTE: Gemini is intentionally disabled in demo mode.
-// This path is only used if AI_MODE=gemini.
 async function callGemini(prompt) {
   const res = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
     method: "POST",
@@ -41,10 +46,10 @@ async function callGemini(prompt) {
       contents: [
         {
           role: "user",
-          parts: [{ text: prompt }]
-        }
-      ]
-    })
+          parts: [{ text: prompt }],
+        },
+      ],
+    }),
   });
 
   if (!res.ok) {
@@ -56,39 +61,30 @@ async function callGemini(prompt) {
   return data.candidates?.[0]?.content?.parts?.[0]?.text;
 }
 
-// ---------------- MOCK ANALYSIS ----------------
-// Deterministic fallback for demo stability
+// ---------------- MOCK ANALYSIS (DEMO SAFE) ----------------
 function mockAnalysis() {
   return {
-    riskLevel: "high",
-    clauses: [
-      {
-        text: "Termination without notice",
-        explanation:
-          "The company can end the agreement at any time without warning.",
-        severity: "high"
-      },
-      {
-        text: "Data sharing with third parties",
-        explanation:
-          "User data may be shared with external parties without clear limits.",
-        severity: "high"
-      }
+    riskLevel: "High",
+    risks: [
+      "The agreement allows termination without prior notice.",
+      "User data may be shared with third parties without clear limitations.",
     ],
-    summary:
-      "This agreement favors the company and provides limited protection to the user."
+    warning:
+      "This agreement strongly favors the company and poses significant risk to the user.",
   };
 }
 
 // ---------------- ANALYZE ROUTE ----------------
 app.post("/analyze", async (req, res) => {
-  const { text, context } = req.body;
+  const { text, environment } = req.body;
 
-  if (!text || typeof text !== "string") {
-    return res.status(400).json({ error: "Text is required" });
+  if (!text || typeof text !== "string" || text.length < 50) {
+    return res.status(400).json({
+      error: "Text must be a string with at least 50 characters",
+    });
   }
 
-  // Demo mode: always return mock (intentional)
+  // DEMO MODE: Always return mock
   if (AI_MODE === "mock") {
     return res.json(mockAnalysis());
   }
@@ -97,18 +93,18 @@ app.post("/analyze", async (req, res) => {
 Respond ONLY with valid JSON. No markdown.
 
 Analyze the agreement.
-Flag risky clauses.
-Explain risks simply.
+Identify risky clauses.
+Explain risks clearly.
 Classify overall risk.
 
 Return JSON:
 {
-  "risk_level": "LOW|MEDIUM|HIGH",
+  "risk_level": "LOW | MEDIUM | HIGH",
   "risky_clauses": [{ "clause": "", "reason": "" }],
   "summary": ""
 }
 
-Context: ${context || "general user"}
+Context: ${environment || "general user"}
 Agreement:
 """${text}"""
 `;
@@ -123,19 +119,12 @@ Agreement:
     const parsed = JSON.parse(cleaned);
 
     return res.json({
-      riskLevel: parsed.risk_level.toLowerCase(),
-      clauses: parsed.risky_clauses.map((c) => ({
-        text: c.clause,
-        explanation: c.reason,
-        severity: parsed.risk_level.toLowerCase()
-      })),
-      summary: parsed.summary
+      riskLevel: normalizeRiskLevel(parsed.risk_level),
+      risks: parsed.risky_clauses.map((c) => c.reason),
+      warning: parsed.summary,
     });
   } catch (err) {
     console.error("AI ERROR, FALLING BACK TO MOCK:", err.message);
-
-    // We intentionally return 200 with mock data
-    // to keep UX stable during demos and judging
     return res.json(mockAnalysis());
   }
 });
