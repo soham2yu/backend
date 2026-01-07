@@ -2,7 +2,6 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
-// Load env vars
 dotenv.config();
 
 // ---------------- CONFIG ----------------
@@ -32,7 +31,24 @@ function normalizeRiskLevel(level) {
   return "Low";
 }
 
-// ---------------- RULE-BASED ENGINE ----------------
+// ---------------- INPUT QUALITY CHECK ----------------
+function isLowSignalText(text) {
+  // repeated characters
+  if (/([a-zA-Z])\1{10,}/.test(text)) return true;
+
+  const words = text.split(/\s+/);
+  if (words.length < 10) return true;
+
+  const uniqueWords = new Set(words);
+  if (uniqueWords.size / words.length < 0.3) return true;
+
+  // no sentence structure
+  if (!/[.!?]/.test(text)) return true;
+
+  return false;
+}
+
+// ---------------- RULE ENGINE ----------------
 function ruleBasedAnalysis(text, environment) {
   const t = text.toLowerCase();
   const risks = [];
@@ -106,21 +122,32 @@ app.post("/analyze", async (req, res) => {
     });
   }
 
-  // Always run rule engine
+  // Low-signal detection
+  if (isLowSignalText(text)) {
+    return res.json({
+      riskLevel: "Medium",
+      risks: [
+        "The provided text does not appear to be a valid agreement or meaningful message."
+      ],
+      warning:
+        "The text lacks sufficient structure for accurate analysis. Please provide a complete agreement."
+    });
+  }
+
+  // Rule-based analysis (always runs)
   const ruleResult = ruleBasedAnalysis(text, environment);
 
-  // MOCK MODE → rule engine only (deterministic)
+  // MOCK MODE → deterministic & safe
   if (AI_MODE === "mock") {
     return res.json(ruleResult);
   }
 
-  // GEMINI MODE → enrich but never override rules
+  // GEMINI MODE → enrichment only
   try {
     const prompt = `
 Respond ONLY with valid JSON.
 
-Analyze the agreement.
-Identify subtle risks or manipulative language.
+Identify additional subtle risks or manipulative language.
 
 Return JSON:
 {
