@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import dotenv from "dotenv";
 
-// Load environment variables FIRST
+// Load env vars
 dotenv.config();
 
 // ---------------- CONFIG ----------------
@@ -18,7 +18,7 @@ if (AI_MODE === "gemini" && !GEMINI_API_KEY) {
   throw new Error("GEMINI_API_KEY missing while AI_MODE=gemini");
 }
 
-// ---------------- APP SETUP ----------------
+// ---------------- APP ----------------
 const app = express();
 app.use(cors());
 app.use(express.json());
@@ -32,12 +32,48 @@ function normalizeRiskLevel(level) {
   return "Low";
 }
 
-// ---------------- HEALTH CHECK ----------------
+// ---------------- RULE-BASED ENGINE ----------------
+function ruleBasedAnalysis(text, environment) {
+  const t = text.toLowerCase();
+  const risks = [];
+
+  if (t.includes("terminate without notice") || t.includes("termination without notice")) {
+    risks.push("The agreement allows termination without prior notice.");
+  }
+
+  if (t.includes("third party") && t.includes("data")) {
+    risks.push("User data may be shared with third parties without clear limitations.");
+  }
+
+  if (t.match(/immediately|within \d+ days|as soon as possible/)) {
+    risks.push("Urgency language may pressure the user into agreement.");
+  }
+
+  let riskLevel = "Low";
+  if (risks.length >= 2) riskLevel = "High";
+  else if (risks.length === 1) riskLevel = "Medium";
+
+  // Environment amplification
+  if (environment === "Overwhelmed" && riskLevel === "Medium") {
+    riskLevel = "High";
+  }
+
+  const warning =
+    riskLevel === "High"
+      ? "Do NOT sign or agree without legal consultation. The detected risks are significant."
+      : riskLevel === "Medium"
+      ? "Proceed with caution. Clarify the highlighted terms before agreeing."
+      : "No major risks detected, but always read carefully before signing.";
+
+  return { riskLevel, risks, warning };
+}
+
+// ---------------- HEALTH ----------------
 app.get("/health", (_req, res) => {
   res.json({ status: "ok", aiMode: AI_MODE });
 });
 
-// ---------------- GEMINI CALL ----------------
+// ---------------- GEMINI ----------------
 async function callGemini(prompt) {
   const res = await fetch(`${GEMINI_ENDPOINT}?key=${GEMINI_API_KEY}`, {
     method: "POST",
@@ -53,79 +89,61 @@ async function callGemini(prompt) {
   });
 
   if (!res.ok) {
-    const err = await res.text();
-    throw new Error(err);
+    throw new Error(await res.text());
   }
 
   const data = await res.json();
   return data.candidates?.[0]?.content?.parts?.[0]?.text;
 }
 
-// ---------------- MOCK ANALYSIS (DEMO SAFE) ----------------
-function mockAnalysis() {
-  return {
-    riskLevel: "High",
-    risks: [
-      "The agreement allows termination without prior notice.",
-      "User data may be shared with third parties without clear limitations.",
-    ],
-    warning:
-      "This agreement strongly favors the company and poses significant risk to the user.",
-  };
-}
-
-// ---------------- ANALYZE ROUTE ----------------
+// ---------------- ANALYZE ----------------
 app.post("/analyze", async (req, res) => {
   const { text, environment } = req.body;
 
   if (!text || typeof text !== "string" || text.length < 50) {
     return res.status(400).json({
-      error: "Text must be a string with at least 50 characters",
+      error: "Text must be at least 50 characters",
     });
   }
 
-  // DEMO MODE: Always return mock
+  // Always run rule engine
+  const ruleResult = ruleBasedAnalysis(text, environment);
+
+  // MOCK MODE → rule engine only (deterministic)
   if (AI_MODE === "mock") {
-    return res.json(mockAnalysis());
+    return res.json(ruleResult);
   }
 
-  const prompt = `
-Respond ONLY with valid JSON. No markdown.
+  // GEMINI MODE → enrich but never override rules
+  try {
+    const prompt = `
+Respond ONLY with valid JSON.
 
 Analyze the agreement.
-Identify risky clauses.
-Explain risks clearly.
-Classify overall risk.
+Identify subtle risks or manipulative language.
 
 Return JSON:
 {
-  "risk_level": "LOW | MEDIUM | HIGH",
-  "risky_clauses": [{ "clause": "", "reason": "" }],
+  "additional_risks": [],
   "summary": ""
 }
 
-Context: ${environment || "general user"}
 Agreement:
 """${text}"""
 `;
 
-  try {
     const raw = await callGemini(prompt);
-
-    const cleaned = raw
-      .replace(/```json|```/g, "")
-      .replace(/^[^{]*({[\\s\\S]*})[^}]*$/, "$1");
-
+    const cleaned = raw.replace(/```json|```/g, "");
     const parsed = JSON.parse(cleaned);
 
     return res.json({
-      riskLevel: normalizeRiskLevel(parsed.risk_level),
-      risks: parsed.risky_clauses.map((c) => c.reason),
-      warning: parsed.summary,
+      riskLevel: ruleResult.riskLevel,
+      risks: [...ruleResult.risks, ...(parsed.additional_risks || [])],
+      warning: parsed.summary || ruleResult.warning,
     });
   } catch (err) {
-    console.error("AI ERROR, FALLING BACK TO MOCK:", err.message);
-    return res.json(mockAnalysis());
+    console.error("AI FAILED, USING RULE ENGINE:", err.message);
+    return res.json(ruleResult);
   }
 });
 
