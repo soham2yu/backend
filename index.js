@@ -15,11 +15,16 @@ if (!process.env.GEMINI_API_KEY) {
 }
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-const model = genAI.getGenerativeModel({ model: "gemini-pro" });
+const model = genAI.getGenerativeModel({ model: "models/gemini-1.0-pro" });
+
+
+
 
 // ---------- Helper: AI analysis ----------
 async function analyzeWithGemini(text, context) {
-  const prompt = `
+const prompt = `
+Respond ONLY with valid JSON. No explanations. No markdown.
+
 You are a decision-safety assistant.
 
 Task:
@@ -35,8 +40,6 @@ Rules:
 - Do not give legal advice
 - Do not invent facts
 - Be cautious and conservative
-- Respond ONLY with valid JSON
-- Do NOT include markdown
 
 Return JSON in this exact format:
 {
@@ -54,10 +57,26 @@ Agreement:
 """${text}"""
 `;
 
-  const result = await model.generateContent(prompt);
-  const raw = result.response.text().trim();
 
-  return JSON.parse(raw);
+  const result = await model.generateContent(prompt);
+let raw = result.response.text();
+
+raw = raw
+  .replace(/```json|```/g, "")
+  .replace(/^[^{]*({[\s\S]*})[^}]*$/, "$1")
+  .trim();
+
+let parsed;
+try {
+  parsed = JSON.parse(raw);
+} catch (e) {
+  console.error("RAW GEMINI OUTPUT:\n", raw);
+  throw new Error("Gemini returned invalid JSON");
+}
+
+return parsed;
+
+
 }
 
 // ---------- Route ----------
